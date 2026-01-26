@@ -120,6 +120,19 @@ User Question:
 # FASTAPI SERVER
 # ----------------------------
 app = FastAPI(title="FreightBot RAG Chatbot")
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI(title="FreightBot RAG Chatbot")
+
+# Allow all origins (for testing)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # In production, replace "*" with your website URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class Query(BaseModel):
     question: str
@@ -135,3 +148,4 @@ def chat_endpoint(data: Query):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
