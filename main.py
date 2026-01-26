@@ -1,73 +1,103 @@
 # -*- coding: utf-8 -*-
+
 import os
+import chromadb
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from langchain.document_loaders import PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_community.vectorstores import Chroma
 
-# ----------------------------
-# CONFIG
-# ----------------------------
-# Gemini API key from environment variable
-if "GOOGLE_API_KEY" not in os.environ:
-    raise ValueError("Set GOOGLE_API_KEY in environment variables!")
+print("🚀 Starting FreightBot server...")
 
-GEMINI_KEY = os.environ["GOOGLE_API_KEY"]
+# --------------------------------
+# ENV CHECK
+# --------------------------------
 
-PDF_FOLDER = "./docs"          # Place your PDFs here
-VECTOR_DB_DIR = "./drive_rag" # Persisted vector database
+REQUIRED_VARS = ["GOOGLE_API_KEY", "CHROMA_API_KEY", "CHROMA_TENANT"]
 
-# ----------------------------
-# LOAD PDF DOCUMENTS
-# ----------------------------
-docs = []
-for file in os.listdir(PDF_FOLDER):
-    if file.endswith(".pdf"):
-        loader = PyPDFLoader(os.path.join(PDF_FOLDER, file))
-        docs.extend(loader.load())
+for v in REQUIRED_VARS:
+    if v not in os.environ:
+        raise ValueError(f"Missing environment variable: {v}")
 
-print(f"Loaded {len(docs)} PDF pages.")
+print("✅ Environment variables loaded")
 
-# ----------------------------
-# SPLIT DOCUMENTS INTO CHUNKS
-# ----------------------------
-splitter = RecursiveCharacterTextSplitter(
-    chunk_size=600,
-    chunk_overlap=100
+# --------------------------------
+# FASTAPI INIT
+# --------------------------------
+
+app = FastAPI(title="FreightBot RAG Chatbot")
+
+# Enable browser access (CORS)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # Replace with your domain later
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-chunks = splitter.split_documents(docs)
-print(f"Total chunks: {len(chunks)}")
 
-# ----------------------------
-# EMBEDDINGS & VECTOR DB
-# ----------------------------
+# --------------------------------
+# CONNECT TO CHROMA CLOUD
+# --------------------------------
+
+print("🔌 Connecting to Chroma Cloud...")
+
+client = chromadb.CloudClient(
+    api_key=os.environ["CHROMA_API_KEY"],
+    tenant=os.environ["CHROMA_TENANT"],
+    database="freightbot"
+)
+
+print("✅ Chroma Cloud connected")
+
+# --------------------------------
+# EMBEDDINGS
+# --------------------------------
+
+print("🧠 Loading Gemini embeddings...")
+
 embeddings = GoogleGenerativeAIEmbeddings(
     model="models/embedding-001"
 )
 
-db = Chroma.from_documents(
-    chunks,
-    embedding=embeddings,
-    persist_directory=VECTOR_DB_DIR
+# --------------------------------
+# VECTOR DATABASE
+# --------------------------------
+
+print("📦 Loading vector database collection...")
+
+db = Chroma(
+    client=client,
+    collection_name="freightbot",
+    embedding_function=embeddings
 )
 
-print("Vector DB created")
+print("✅ Vector database ready")
 
-# ----------------------------
+# --------------------------------
 # GEMINI CHAT MODEL
-# ----------------------------
+# --------------------------------
+
+print("🤖 Loading Gemini chat model...")
+
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
     temperature=0.2
 )
 
-# ----------------------------
-# HELPER FUNCTIONS
-# ----------------------------
+print("✅ Gemini model loaded")
+
+# --------------------------------
+# CHAT MEMORY
+# --------------------------------
+
+chat_history = []
+
+# --------------------------------
+# QUERY CLEANER (SPELL FIX)
+# --------------------------------
+
 def improve_query(user_question: str) -> str:
-    """Fix typos / rewrite query for better retrieval"""
     prompt = f"""
 Fix spelling mistakes and rewrite this question clearly:
 
@@ -76,15 +106,26 @@ Fix spelling mistakes and rewrite this question clearly:
     result = llm.invoke(prompt)
     return result.content
 
-chat_history = []
+# --------------------------------
+# MAIN CHAT FUNCTION
+# --------------------------------
 
 def ask_bot(question: str) -> str:
-    global chat_history
+
+    print("🔍 User Question:", question)
 
     better_question = improve_query(question)
 
-    docs_with_score = db.similarity_search_with_score(better_question, k=8)
-    filtered_docs = [doc for doc, score in docs_with_score if score < 0.7]
+    print("✨ Improved Query:", better_question)
+
+    docs_with_score = db.similarity_search_with_score(
+        better_question,
+        k=8
+    )
+
+    filtered_docs = [doc for doc, score in docs_with_score if score < 0.8]
+
+    print("📄 Retrieved chunks:", len(filtered_docs))
 
     if len(filtered_docs) == 0:
         return "I don't have that information in my knowledge base."
@@ -92,7 +133,7 @@ def ask_bot(question: str) -> str:
     context = "\n\n".join([d.page_content for d in filtered_docs])
 
     prompt = f"""
-You are a professional assistant.
+You are a professional shipping company assistant.
 
 Rules:
 - Use ONLY provided context
@@ -116,36 +157,49 @@ User Question:
 
     return response.content
 
-# ----------------------------
-# FASTAPI SERVER
-# ----------------------------
-app = FastAPI(title="FreightBot RAG Chatbot")
-from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI(title="FreightBot RAG Chatbot")
-
-# Allow all origins (for testing)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # In production, replace "*" with your website URL
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
+# --------------------------------
+# API MODELS
+# --------------------------------
 
 class Query(BaseModel):
     question: str
 
+
+# --------------------------------
+# API ROUTES
+# --------------------------------
+
+@app.get("/")
+def root():
+    return {
+        "status": "FreightBot is running",
+        "vector_db": "connected",
+        "model": "Gemini"
+    }
+
+
 @app.post("/chat")
 def chat_endpoint(data: Query):
+
+    print("📩 Incoming chat request")
+
     answer = ask_bot(data.question)
+
+    print("✅ Response sent")
+
     return {"answer": answer}
 
-# ----------------------------
-# RUN SERVER (for local dev)
-# ----------------------------
+
+# --------------------------------
+# LOCAL DEV ONLY
+# --------------------------------
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
 
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000
+    )
