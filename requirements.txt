@@ -1,0 +1,7 @@
+langchain==0.2.16
+langchain-community
+chromadb
+pypdf
+langchain-google-genai
+fastapi
+uvicorn
