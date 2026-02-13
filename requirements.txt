@@ -1,7 +1,10 @@
-langchain==0.2.16
-langchain-community
-chromadb
-pypdf
-langchain-google-genai
 fastapi
 uvicorn
+chromadb
+langchain
+langchain-community
+langchain-google-genai
+google-api-python-client
+google-auth
+langdetect
+slowapi
