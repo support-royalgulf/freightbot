@@ -105,28 +105,44 @@ async def save_chat_to_sheet(session_id, role, message):
 async def ask_bot(question, history=[]):
     scrubbed_question = mask_pii(question)
     
-    # Similarity Search
+    # --- STEP 1: Query Expansion ---
+    # Turns "Price" into "What are the shipping rates and pricing for Royal Gulf Shipping?"
+    expansion_prompt = f"Convert this user query into a descriptive search phrase for a shipping manual: {scrubbed_question}"
+    expanded_query_res = await classifier_llm.ainvoke([HumanMessage(content=expansion_prompt)])
+    search_query = expanded_query_res.content
+
+    # --- STEP 2: Similarity Search with Expanded Query ---
     docs = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: db.similarity_search_with_score(scrubbed_question, k=4)
+        None, lambda: db.similarity_search_with_score(search_query, k=5)
     )
-    # Loosen filter slightly to ensure cold storage etc are caught
-    filtered = [doc for doc, score in docs if score < 0.80]
+    
+    # Loosen the threshold (ChromaDB scores can vary; 1.0+ is often still relevant)
+    filtered = [doc for doc, score in docs if score < 1.1] 
+
+    if not filtered:
+        # Fallback: Try searching with the original question if expansion failed
+        docs_retry = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: db.similarity_search_with_score(scrubbed_question, k=2)
+        )
+        filtered = [doc for doc, score in docs_retry if score < 1.1]
 
     if not filtered:
         return "NO_CONTEXT"
 
+    # --- STEP 3: RAG with Better Context ---
     context = "\n".join([d.page_content for d in filtered])
     
     system_instr = (
-        "You are the Royal Gulf Shipping Assistant. "
-        "Answer ONLY using the provided context. Answer in 1-2 very short, precise sentences. "
-        "If the answer is not in the context, say 'I don't have that information'."
+        "You are Bianca, the Royal Gulf Shipping Assistant. "
+        "Use the provided context to answer the user concisely. "
+        "If the information is not present, guide them to 'Talk to an Agent'. "
+        "Keep it professional and helpful."
     )
     
-    secure_human_msg = f"CONTEXT:\n{context}\n\nUSER QUERY: <user_query>{scrubbed_question}</user_query>"
+    secure_human_msg = f"CONTEXT:\n{context}\n\nUSER QUERY: {scrubbed_question}"
     
     messages = [SystemMessage(content=system_instr)]
-    messages.extend(history[-2:]) 
+    messages.extend(history[-4:]) # Include more history for better flow
     messages.append(HumanMessage(content=secure_human_msg))
 
     response = await rag_llm.ainvoke(messages)
@@ -204,8 +220,44 @@ async def chat(req: ChatRequest, request: Request):
     session = sessions[session_id]
     await save_chat_to_sheet(session_id, "User", user_msg)
 
+    # 1. KEYWORD DETECTION FOR BUTTONS
+    dry_keywords = ["dry storage", "warehouse", "self-storage", "private storage", "commercial storage", "personal", "private", "lockable", "monthly", "commercial","facility","dry"]
+    cold_keywords = ["cold storage", "reefer", "frozen", "chilled", "temperature-controlled", "food storage", "food", "refrigerated", "temp-controlled","ambient","chiller","cold room","cold","temper"]
+
+    if any(k in user_msg for k in dry_keywords):
+        return {
+            "session_id": session_id,
+            "answer": "We offer professional Dry Storage/Warehouse solutions. Which option are you interested in?",
+            "buttons": ["Dry: 20ft Price", "Dry: 40ft Price", "Dry: Pallet Price", "Main Menu"]
+        }
+
+    if any(k in user_msg for k in cold_keywords):
+        return {
+            "session_id": session_id,
+            "answer": "Our Cold Storage ranges from -18°C to +25°C. Which size do you need?",
+            "buttons": ["Cold: 20ft Price", "Cold: 40ft Price", "Cold: Pallet Price", "Main Menu"]
+        }
+
+    # 2. HANDLING THE BUTTON SELECTIONS
+    pricing_map = {
+        "Dry: 20ft Price": "Dry Storage 20ft: 1350 AED per month. *Please note that prices are subject to change and might vary.*",
+        "Dry: 40ft Price": "Dry Storage 40ft: 2450 AED per month. *Please note that prices are subject to change and might vary.*",
+        "Dry: Pallet Price": "Dry Storage Per Pallet: Please contact our team for a customized quote. *Prices might vary.*",
+        "Cold: 20ft Price": "Cold Storage 20ft: 4350 AED per month. *Please note that prices are subject to change and might vary.*",
+        "Cold: 40ft Price": "Cold Storage 40ft: 6450 AED per month. *Please note that prices are subject to change and might vary.*",
+        "Cold: Pallet Price": "Cold Storage Per Pallet: 850 AED per month. *Please note that prices are subject to change and might vary.*"
+    }
+
+    if user_msg in pricing_map:
+        return {
+            "session_id": session_id,
+            "answer": pricing_map[user_msg],
+            "buttons": ["Request a Quote", "Talk to an Agent", "Main Menu"]
+        }
+
+
     # 2. HANDLE EXIT
-    if any(k in user_msg.lower() for k in ["exit", "end chat", "bye", "✕"]):
+    if any(k in user_msg.lower() for k in ["exit", "thank you", "thanks", "end chat", "bye", "✕"]):
         sessions.pop(session_id, None)
         return {"answer": "Thank you for choosing Royal Gulf Shipping! 🚢", "end_chat": True}
 
